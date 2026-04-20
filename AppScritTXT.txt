@@ -1,0 +1,155 @@
+var DOC_ID = "1bSV1VILNLFubLVVrRtVs_tbfj889p3edBtLhT1SHHZE"; // Twoje ID Dokumentu
+
+function doGet(e) {
+  if (!e || !e.parameter) return ContentService.createTextOutput("Błąd: Brak parametrów");
+  
+  try {
+    var action = e.parameter.action;
+    
+    // --- USUWANIE ---
+    if (action === "delete") {
+      return usunOstatniRekord();
+    }
+
+    // --- DODAWANIE ---
+    var raw = (e.parameter.raw || "").toString().trim();
+    var kodBin = e.parameter.kod;
+    var przeznaczenie = (e.parameter.kontener || "NIEZNANE").toLowerCase();
+    
+    if (!raw) return ContentService.createTextOutput("Błąd: Brak kodu");
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getActiveSheet();
+    var teraz = new Date();
+
+    // Sprawdzanie duplikatów w kolumnie B
+    var daneB = sheet.getRange("B:B").getValues();
+    var czyIstnieje = false;
+    for (var i = 0; i < daneB.length; i++) {
+      if (daneB[i][0].toString().trim() === raw) {
+        czyIstnieje = true;
+        break;
+      }
+    }
+
+    // Zapis do arkusza
+    sheet.appendRow([teraz, raw, przeznaczenie.toUpperCase()]);
+    var lastRow = sheet.getLastRow();
+    var range = sheet.getRange(lastRow, 1, 1, 3);
+    
+    // Kolorowanie w arkuszu
+    if (czyIstnieje) {
+      range.setBackground("#FF0000").setFontColor("#FFFFFF").setFontWeight("bold");
+    } else {
+      range.setBackground("#2196F3").setFontColor("#FFFFFF").setFontWeight("normal");
+    }
+    
+    SpreadsheetApp.flush();
+    dopisDoDoc(raw, kodBin, przeznaczenie, teraz);
+    
+    return ContentService.createTextOutput(czyIstnieje ? "DUPLIKAT: " + raw : "DODANO: " + raw);
+  } catch (err) {
+    return ContentService.createTextOutput("BŁĄD KRYTYCZNY: " + err.toString());
+  }
+}
+
+function usunOstatniRekord() {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getActiveSheet();
+    var lastRow = sheet.getLastRow();
+    
+    if (lastRow < 2) return ContentService.createTextOutput("ARKUSZ JEST PUSTY");
+
+    // 1. USUWANIE Z ARKUSZA
+    sheet.deleteRow(lastRow);
+
+    // 2. USUWANIE Z DOKUMENTU
+    var doc = DocumentApp.openById(DOC_ID);
+    var body = doc.getBody();
+    var numChildren = body.getNumChildren();
+    
+    // Szukamy ostatniego separatora
+    var lastSeparatorIdx = -1;
+    for (var i = numChildren - 1; i >= 0; i--) {
+      var child = body.getChild(i);
+      if (child.getType() === DocumentApp.ElementType.PARAGRAPH) {
+        if (child.asParagraph().getText().match(/-{10,}/)) {
+          lastSeparatorIdx = i;
+          break;
+        }
+      }
+    }
+
+    if (lastSeparatorIdx !== -1) {
+      // Jeśli separator jest na samym początku (index 0), to czyścimy cały dokument bezpiecznie
+      if (lastSeparatorIdx === 0) {
+        body.clear(); 
+        // body.clear() zostawia jeden pusty akapit, co jest bezpieczne
+      } else {
+        // Usuwamy elementy od końca aż do separatora włącznie
+        for (var j = numChildren - 1; j >= lastSeparatorIdx; j--) {
+          try {
+            if (body.getNumChildren() > 1) {
+              body.removeChild(body.getChild(j));
+            } else {
+              // OSTATNI RATUNEK: Jeśli to ostatni element, wstawiamy SPACJĘ zamiast pustki
+              var lastPara = body.getChild(0).asParagraph();
+              lastPara.setText(" "); // Spacja zamiast "" rozwiązuje Twój błąd
+              lastPara.setAttributes(null);
+            }
+          } catch (e) {
+            // Jeśli removeChild zawiedzie, próbujemy chociaż wyczyścić tekst spacją
+            var el = body.getChild(j);
+            if (el.getType() === DocumentApp.ElementType.PARAGRAPH) {
+              el.asParagraph().setText(" ");
+            }
+          }
+        }
+      }
+      
+      doc.saveAndClose();
+      return ContentService.createTextOutput("USUNIĘTO WPIS ");
+    }
+    
+    return ContentService.createTextOutput("W DOC NIE ZNALEZIONO SEPARATORA");
+    
+  } catch (e) {
+    return ContentService.createTextOutput("BŁĄD KRYTYCZNY: " + e.message);
+  }
+}
+
+function dopisDoDoc(raw, kodBin, przeznaczenie, teraz) {
+  var doc = DocumentApp.openById(DOC_ID);
+  var body = doc.getBody();
+  var kolor = (przeznaczenie === "lodowka") ? "#0000FF" : "#FF5722";
+  
+  var style = {};
+  style[DocumentApp.Attribute.BOLD] = true;
+  style[DocumentApp.Attribute.FOREGROUND_COLOR] = kolor;
+  style[DocumentApp.Attribute.FONT_SIZE] = 14;
+
+  // Sprawdzamy czy pierwszy akapit jest całkiem pusty (żeby nie robić dziury na górze)
+  if (body.getNumChildren() === 1 && body.getChild(0).asParagraph().getText().trim() === "") {
+    var p1 = body.getChild(0).asParagraph();
+    p1.setText("--------------------------------------------------").setAttributes(style);
+  } else {
+    body.appendParagraph("--------------------------------------------------").setAttributes(style);
+  }
+
+  body.appendParagraph("PRZEZNACZENIE: " + przeznaczenie.toUpperCase()).setAttributes(style);
+  
+  var barcodeUrl = "https://bwipjs-api.metafloor.com/?bcid=code128&text=" + raw + "&scale=2";
+  try {
+    var blob = UrlFetchApp.fetch(barcodeUrl).getBlob();
+    body.appendImage(blob);
+  } catch (e) {
+    body.appendParagraph("[Błąd obrazu]");
+  }
+
+  body.appendParagraph("KOD: " + raw).setBold(true);
+  body.appendParagraph("ZAPIS BINARNY:").setBold(true).setFontSize(9).setForegroundColor("#666666");
+  body.appendParagraph(kodBin).setFontFamily("Courier New").setFontSize(8).setForegroundColor("#999999");
+  body.appendParagraph("DATA: " + Utilities.formatDate(teraz, "GMT+2", "yyyy-MM-dd HH:mm:ss")).setFontSize(9);
+  body.appendParagraph(""); 
+}
